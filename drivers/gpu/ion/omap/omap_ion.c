@@ -23,6 +23,9 @@
 #include "../ion_priv.h"
 #include "omap_ion_priv.h"
 
+int (*dfv_ion_alloc)(void *data, int type);
+EXPORT_SYMBOL(dfv_ion_alloc);
+
 struct ion_device *omap_ion_device;
 EXPORT_SYMBOL(omap_ion_device);
 
@@ -34,8 +37,24 @@ static struct ion_heap *nonsecure_tiler_heap;
 int omap_ion_tiler_alloc(struct ion_client *client,
 			 struct omap_ion_tiler_alloc_data *data)
 {
-	return omap_tiler_alloc(tiler_heap, client, data);
+	int ret;
+	
+	ret = omap_tiler_alloc(tiler_heap, client, data);
+	
+	if (dfv_ion_alloc) {
+		if (!ret) {
+			/*
+			 * We don't return error if the allocation on the
+			 * server fails.
+			 */
+			(*dfv_ion_alloc)((void *) data, 1);		
+		} else
+			printk("Error: omap_tiler_alloc returned error.\n");
+	}
+	
+	return ret;
 }
+EXPORT_SYMBOL(omap_ion_tiler_alloc);
 
 int omap_ion_nonsecure_tiler_alloc(struct ion_client *client,
 			 struct omap_ion_tiler_alloc_data *data)
@@ -83,9 +102,9 @@ int omap_ion_probe(struct platform_device *pdev)
 	int i;
 
 	num_heaps = pdata->nr;
-
+	
 	heaps = kzalloc(sizeof(struct ion_heap *) * pdata->nr, GFP_KERNEL);
-
+	
 	omap_ion_device = ion_device_create(omap_ion_ioctl);
 	if (IS_ERR_OR_NULL(omap_ion_device)) {
 		kfree(heaps);

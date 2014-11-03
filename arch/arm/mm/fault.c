@@ -26,6 +26,40 @@
 
 #include "fault.h"
 
+int (*dfv_access_check) (unsigned long addr, unsigned int fsr,
+			struct vm_area_struct *vma, int is_user_addr);
+EXPORT_SYMBOL(dfv_access_check);
+
+/* FIXME: Put these symbols somewhere else. They don't belong here. */
+unsigned long (*dfv_copy_from_user) (void *to, const void __user *from,
+							unsigned long n);
+EXPORT_SYMBOL(dfv_copy_from_user);
+unsigned long (*dfv_copy_to_user) (void __user *to, const void *from,
+							unsigned long n);
+EXPORT_SYMBOL(dfv_copy_to_user);
+int (*dfv_get_user) (void *to, const void __user *from, unsigned long n);
+EXPORT_SYMBOL(dfv_get_user);
+int (*dfv_put_user) (void __user *to, const void *from, unsigned long n);
+EXPORT_SYMBOL(dfv_put_user);
+long (*dfv_strncpy_from_user) (char *dst, const char __user *src, long count);
+EXPORT_SYMBOL(dfv_strncpy_from_user);
+unsigned long (*dfv_clear_user) (void __user *to, unsigned long n);
+EXPORT_SYMBOL(dfv_clear_user);
+long (*dfv_strnlen_user) (const char __user *s, long n);
+EXPORT_SYMBOL(dfv_strnlen_user);
+unsigned long (*dfv_range_not_ok)(const void __user *addr, long size);
+EXPORT_SYMBOL(dfv_range_not_ok);
+unsigned long (*dfv_copy_from_user_inatomic) (void *to, const void __user *from,
+							unsigned long n);
+EXPORT_SYMBOL(dfv_copy_from_user_inatomic);
+unsigned long (*dfv_copy_from_user_ll_nocache_nozero) (void *to,
+				const void __user *from, unsigned long n);
+EXPORT_SYMBOL(dfv_copy_from_user_ll_nocache_nozero);
+unsigned long (*dfv_copy_to_user_inatomic) (void __user *to, const void *from,
+							unsigned long n);
+EXPORT_SYMBOL(dfv_copy_to_user_inatomic);
+
+
 /*
  * Fault status register encodings.  We steal bit 31 for our own purposes.
  */
@@ -129,6 +163,7 @@ void show_pte(struct mm_struct *mm, unsigned long addr)
 
 	printk("\n");
 }
+EXPORT_SYMBOL(show_pte);
 #else					/* CONFIG_MMU */
 void show_pte(struct mm_struct *mm, unsigned long addr)
 { }
@@ -141,6 +176,10 @@ static void
 __do_kernel_fault(struct mm_struct *mm, unsigned long addr, unsigned int fsr,
 		  struct pt_regs *regs)
 {
+	if (dfv_access_check && 
+	    !(*dfv_access_check)(addr, fsr, NULL, 0))
+		return;
+
 	/*
 	 * Are we prepared to handle this kernel fault?
 	 */
@@ -248,9 +287,14 @@ __do_page_fault(struct mm_struct *mm, unsigned long addr, unsigned int fsr,
 	 */
 good_area:
 	if (access_error(fsr, vma)) {
+		if (!dfv_access_check || 
+		  (*dfv_access_check)(addr, fsr, vma, 1)) {
 		fault = VM_FAULT_BADACCESS;
 		goto out;
+		}
 	}
+	else if (dfv_access_check)
+		(*dfv_access_check)(addr, fsr, vma, 1);
 
 	/*
 	 * If for any reason at all we couldn't handle the fault, make

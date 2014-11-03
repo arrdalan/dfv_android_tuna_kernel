@@ -12,6 +12,7 @@
 
 #include <asm/smp_plat.h>
 #include <asm/tlbflush.h>
+#include <linux/module.h>
 
 static void on_each_cpu_mask(void (*func)(void *), void *info, int wait,
 	const struct cpumask *mask)
@@ -83,6 +84,7 @@ void flush_tlb_all(void)
 	else
 		local_flush_tlb_all();
 }
+EXPORT_SYMBOL(flush_tlb_all);
 
 void flush_tlb_mm(struct mm_struct *mm)
 {

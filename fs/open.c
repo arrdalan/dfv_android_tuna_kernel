@@ -33,6 +33,7 @@
 
 #include "internal.h"
 
+
 int do_truncate(struct dentry *dentry, loff_t length, unsigned int time_attrs,
 	struct file *filp)
 {
@@ -700,7 +701,6 @@ static struct file *__dentry_open(struct dentry *dentry, struct vfsmount *mnt,
 		f->f_op = &empty_fops;
 		return f;
 	}
-
 	f->f_op = fops_get(inode->i_fop);
 
 	error = security_dentry_open(f, cred);
@@ -862,6 +862,7 @@ static void __put_unused_fd(struct files_struct *files, unsigned int fd)
 void put_unused_fd(unsigned int fd)
 {
 	struct files_struct *files = current->files;
+
 	spin_lock(&files->file_lock);
 	__put_unused_fd(files, fd);
 	spin_unlock(&files->file_lock);
@@ -886,6 +887,7 @@ void fd_install(unsigned int fd, struct file *file)
 {
 	struct files_struct *files = current->files;
 	struct fdtable *fdt;
+
 	spin_lock(&files->file_lock);
 	fdt = files_fdtable(files);
 	BUG_ON(fdt->fd[fd] != NULL);
@@ -988,12 +990,55 @@ struct file *file_open_root(struct dentry *dentry, struct vfsmount *mnt,
 }
 EXPORT_SYMBOL(file_open_root);
 
+static long do_sys_open_kernel(int dfd, const char *filename, int flags,
+			       int mode, struct file **_f)
+{
+	int fd = get_unused_fd_flags(flags);
+
+	if (fd >= 0) {
+		struct open_flags op;
+		int lookup = build_open_flags(flags, mode, &op);
+		struct file *f = do_filp_open(dfd, filename, &op, lookup);
+		if (IS_ERR(f)) {
+			put_unused_fd(fd);
+			fd = PTR_ERR(f);
+		} else {
+			fsnotify_open(f);
+			fd_install(fd, f);
+		}
+
+		*_f = f;
+	}
+
+	return fd;
+}
+
+long sys_open_kernel(const char * filename, int flags, int mode,
+							struct file **_f)
+{
+	long ret;
+
+	if (force_o_largefile())
+		flags |= O_LARGEFILE;
+
+	ret = do_sys_open_kernel(AT_FDCWD, filename, flags, mode, _f);
+	/* avoid REGPARM breakage on x86: */
+	asmlinkage_protect(3, ret, filename, flags, mode);
+	return ret;
+}
+EXPORT_SYMBOL(sys_open_kernel);
+
 long do_sys_open(int dfd, const char __user *filename, int flags, int mode)
 {
 	struct open_flags op;
 	int lookup = build_open_flags(flags, mode, &op);
 	char *tmp = getname(filename);
 	int fd = PTR_ERR(tmp);
+
+	/* We need a more elegant way to pass these to a module open op. */
+	current->dfvdata[0] = (const void *) filename;
+	current->dfvdata[1] = (const void *) flags;
+	current->dfvdata[2] = (const void *) mode;
 
 	if (!IS_ERR(tmp)) {
 		fd = get_unused_fd_flags(flags);

@@ -30,6 +30,7 @@ static int ion_system_heap_allocate(struct ion_heap *heap,
 	buffer->priv_virt = vmalloc_user(size);
 	if (!buffer->priv_virt)
 		return -ENOMEM;
+	
 	return 0;
 }
 
@@ -91,6 +92,22 @@ int ion_system_heap_map_user(struct ion_heap *heap, struct ion_buffer *buffer,
 	return remap_vmalloc_range(vma, buffer->priv_virt, vma->vm_pgoff);
 }
 
+static int ion_system_heap_phys(struct ion_heap *heap,
+			        struct ion_buffer *buffer,
+			        ion_phys_addr_t *addr, size_t *len)
+{
+	unsigned long pfn, off;
+	
+	pfn = vmalloc_to_pfn(buffer->priv_virt);
+	off = ((unsigned long) buffer->priv_virt) & ~PAGE_MASK;
+	
+	*addr = (pfn << PAGE_SHIFT) | off;
+	
+	*len = buffer->size;
+	
+	return 0;
+}
+
 static struct ion_heap_ops vmalloc_ops = {
 	.allocate = ion_system_heap_allocate,
 	.free = ion_system_heap_free,
@@ -99,6 +116,7 @@ static struct ion_heap_ops vmalloc_ops = {
 	.map_kernel = ion_system_heap_map_kernel,
 	.unmap_kernel = ion_system_heap_unmap_kernel,
 	.map_user = ion_system_heap_map_user,
+	.phys = ion_system_heap_phys,
 };
 
 struct ion_heap *ion_system_heap_create(struct ion_platform_heap *unused)

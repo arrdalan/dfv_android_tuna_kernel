@@ -23,9 +23,16 @@
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
+#include <linux/sched.h>
 #include "ion_priv.h"
 
 #include <asm/mach/map.h>
+#include <linux/module.h>
+
+unsigned long dfv_heap_base[4];
+EXPORT_SYMBOL(dfv_heap_base);
+size_t dfv_heap_size[4];
+EXPORT_SYMBOL(dfv_heap_size);
 
 struct ion_carveout_heap {
 	struct ion_heap heap;
@@ -62,8 +69,14 @@ static int ion_carveout_heap_phys(struct ion_heap *heap,
 				  struct ion_buffer *buffer,
 				  ion_phys_addr_t *addr, size_t *len)
 {
-	*addr = buffer->priv_phys;
-	*len = buffer->size;
+	if (current->dfvcontext_network) {
+		*addr = &buffer->priv_phys;
+		*len = buffer->size / PAGE_SIZE;
+	} else {
+		*addr = buffer->priv_phys;
+		*len = buffer->size;
+	}
+	
 	return 0;
 }
 
@@ -147,6 +160,11 @@ struct ion_heap *ion_carveout_heap_create(struct ion_platform_heap *heap_data)
 		     -1);
 	carveout_heap->heap.ops = &carveout_heap_ops;
 	carveout_heap->heap.type = ION_HEAP_TYPE_CARVEOUT;
+	if (heap_data->id < 4) {
+		dfv_heap_base[heap_data->id] = heap_data->base;
+		dfv_heap_size[heap_data->id] = heap_data->size;
+	} else
+		printk("Error: unexpected heap id %d\n", heap_data->id);
 
 	return &carveout_heap->heap;
 }

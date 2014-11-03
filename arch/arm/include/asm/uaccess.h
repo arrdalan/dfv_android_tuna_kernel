@@ -18,9 +18,28 @@
 #include <asm/domain.h>
 #include <asm/system.h>
 #include <asm/unified.h>
+#include <linux/sched.h> /* for definition of current */
 
 #define VERIFY_READ 0
 #define VERIFY_WRITE 1
+
+extern unsigned long (*dfv_copy_from_user) (void *to, const void __user *from,
+							unsigned long n);
+extern unsigned long (*dfv_copy_to_user) (void __user *to, const void *from,
+							unsigned long n);
+extern int (*dfv_get_user) (void *to, const void __user *from, unsigned long n);
+extern int (*dfv_put_user) (void __user *to, const void *from, unsigned long n);
+extern long (*dfv_strncpy_from_user) (char *dst, const char __user *src,
+							long count);
+extern unsigned long (*dfv_clear_user) (void __user *to, unsigned long n);
+extern long (*dfv_strnlen_user) (const char __user *s, long n);
+extern unsigned long (*dfv_range_not_ok)(const void __user *addr, long size);
+extern unsigned long (*dfv_copy_from_user_inatomic) (void *to,
+				const void __user *from, unsigned long n);
+extern unsigned long (*dfv_copy_from_user_ll_nocache_nozero) (void *to,
+				const void __user *from, unsigned long n);
+extern unsigned long (*dfv_copy_to_user_inatomic) (void __user *to,
+				const void *from, unsigned long n);
 
 /*
  * The exception table consists of pairs of addresses: the first is the
@@ -79,12 +98,18 @@ static inline void set_fs(mm_segment_t fs)
 /* We use 33-bit arithmetic here... */
 #define __range_ok(addr,size) ({ \
 	unsigned long flag, roksum; \
-	__chk_user_ptr(addr);	\
-	__asm__("adds %1, %2, %3; sbcccs %1, %1, %0; movcc %0, #0" \
-		: "=&r" (flag), "=&r" (roksum) \
-		: "r" (addr), "Ir" (size), "0" (current_thread_info()->addr_limit) \
-		: "cc"); \
+	if (current && current->dfvcontext && dfv_range_not_ok) {	\
+		flag = !(*dfv_range_not_ok)((const void __user *) addr, \
+							(long) size);	\
+	} else {							\
+		__chk_user_ptr(addr);	\
+		__asm__("adds %1, %2, %3; sbcccs %1, %1, %0; movcc %0, #0" \
+			: "=&r" (flag), "=&r" (roksum) \
+			: "r" (addr), "Ir" (size), "0" (current_thread_info()->addr_limit) \
+			: "cc"); \
+	}								\
 	flag; })
+
 
 /*
  * Single-value transfer routines.  They automatically use the right
@@ -113,20 +138,27 @@ extern int __get_user_4(void *);
 	({								\
 		register const typeof(*(p)) __user *__p asm("r0") = (p);\
 		register unsigned long __r2 asm("r2");			\
+		unsigned long __r2r;					\
 		register int __e asm("r0");				\
-		switch (sizeof(*(__p))) {				\
-		case 1:							\
-			__get_user_x(__r2, __p, __e, 1, "lr");		\
-	       		break;						\
-		case 2:							\
-			__get_user_x(__r2, __p, __e, 2, "r3", "lr");	\
-			break;						\
-		case 4:							\
-	       		__get_user_x(__r2, __p, __e, 4, "lr");		\
-			break;						\
-		default: __e = __get_user_bad(); break;			\
+		if (current && current->dfvcontext && dfv_get_user) {	\
+			__e = (*dfv_get_user)(&__r2r, p,		\
+				sizeof(*(p)));				\
+			if (__e == 0) x = (typeof(*(p))) __r2r;		\
+		} else {						\
+			switch (sizeof(*(__p))) {			\
+			case 1:						\
+				__get_user_x(__r2, __p, __e, 1, "lr");	\
+	       			break;					\
+			case 2:						\
+				__get_user_x(__r2, __p, __e, 2, "r3", "lr");	\
+				break;					\
+			case 4:						\
+		       		__get_user_x(__r2, __p, __e, 4, "lr");	\
+				break;					\
+			default: __e = __get_user_bad(); break;		\
+			}						\
+			x = (typeof(*(p))) __r2;			\
 		}							\
-		x = (typeof(*(p))) __r2;				\
 		__e;							\
 	})
 
@@ -146,23 +178,30 @@ extern int __put_user_8(void *, unsigned long long);
 #define put_user(x,p)							\
 	({								\
 		register const typeof(*(p)) __r2 asm("r2") = (x);	\
+		typeof(*(p)) __r2r;					\
 		register const typeof(*(p)) __user *__p asm("r0") = (p);\
 		register int __e asm("r0");				\
-		switch (sizeof(*(__p))) {				\
-		case 1:							\
-			__put_user_x(__r2, __p, __e, 1);		\
-			break;						\
-		case 2:							\
-			__put_user_x(__r2, __p, __e, 2);		\
-			break;						\
-		case 4:							\
-			__put_user_x(__r2, __p, __e, 4);		\
-			break;						\
-		case 8:							\
-			__put_user_x(__r2, __p, __e, 8);		\
-			break;						\
-		default: __e = __put_user_bad(); break;			\
-		}							\
+		if (current && current->dfvcontext && dfv_put_user) {	\
+			__r2r = (x);					\
+			__e = (*dfv_put_user)(p,			\
+				&__r2r, sizeof(*(p)));			\
+		} else {						\
+			switch (sizeof(*(__p))) {			\
+			case 1:						\
+				__put_user_x(__r2, __p, __e, 1);	\
+				break;					\
+			case 2:						\
+				__put_user_x(__r2, __p, __e, 2);	\
+				break;					\
+			case 4:						\
+				__put_user_x(__r2, __p, __e, 4);	\
+				break;					\
+			case 8:						\
+				__put_user_x(__r2, __p, __e, 8);	\
+				break;					\
+			default: __e = __put_user_bad(); break;		\
+			}						\
+		} 							\
 		__e;							\
 	})
 
@@ -282,7 +321,10 @@ do {									\
 #define __put_user(x,ptr)						\
 ({									\
 	long __pu_err = 0;						\
-	__put_user_err((x),(ptr),__pu_err);				\
+	if (current && current->dfvcontext && dfv_put_user)		\
+		__pu_err = put_user((x),(ptr));				\
+	else								\
+		__put_user_err((x),(ptr),__pu_err);			\
 	__pu_err;							\
 })
 
@@ -403,6 +445,9 @@ extern unsigned long __must_check __strnlen_user(const char __user *s, long n);
 
 static inline unsigned long __must_check copy_from_user(void *to, const void __user *from, unsigned long n)
 {
+	if (current && current->dfvcontext && dfv_copy_from_user)
+		return (*dfv_copy_from_user)(to, from, n);
+
 	if (access_ok(VERIFY_READ, from, n))
 		n = __copy_from_user(to, from, n);
 	else /* security hole - plug it */
@@ -412,6 +457,9 @@ static inline unsigned long __must_check copy_from_user(void *to, const void __u
 
 static inline unsigned long __must_check copy_to_user(void __user *to, const void *from, unsigned long n)
 {
+	if (current && current->dfvcontext && dfv_copy_to_user)
+		return (*dfv_copy_to_user)(to, from, n);
+
 	if (access_ok(VERIFY_WRITE, to, n))
 		n = __copy_to_user(to, from, n);
 	return n;
@@ -422,6 +470,9 @@ static inline unsigned long __must_check copy_to_user(void __user *to, const voi
 
 static inline unsigned long __must_check clear_user(void __user *to, unsigned long n)
 {
+	if (current && current->dfvcontext && dfv_clear_user)
+		return (*dfv_clear_user)(to, n);
+
 	if (access_ok(VERIFY_WRITE, to, n))
 		n = __clear_user(to, n);
 	return n;
@@ -430,6 +481,10 @@ static inline unsigned long __must_check clear_user(void __user *to, unsigned lo
 static inline long __must_check strncpy_from_user(char *dst, const char __user *src, long count)
 {
 	long res = -EFAULT;
+
+	if (current && current->dfvcontext && dfv_strncpy_from_user)
+		return (*dfv_strncpy_from_user)(dst, src, count);
+
 	if (access_ok(VERIFY_READ, src, 1))
 		res = __strncpy_from_user(dst, src, count);
 	return res;
@@ -440,6 +495,9 @@ static inline long __must_check strncpy_from_user(char *dst, const char __user *
 static inline long __must_check strnlen_user(const char __user *s, long n)
 {
 	unsigned long res = 0;
+
+	if (current && current->dfvcontext && dfv_strnlen_user)
+		return (*dfv_strnlen_user)(s, n);
 
 	if (__addr_ok(s))
 		res = __strnlen_user(s, n);

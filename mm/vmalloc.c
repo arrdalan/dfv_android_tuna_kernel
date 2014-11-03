@@ -107,6 +107,8 @@ static int vmap_pte_range(pmd_t *pmd, unsigned long addr,
 			return -EBUSY;
 		if (WARN_ON(!page))
 			return -ENOMEM;
+		page->dfv_flag =
+			(((unsigned long) addr) >> PAGE_SHIFT) << PAGE_SHIFT;
 		set_pte_at(&init_mm, addr, pte, mk_pte(page, prot));
 		(*nr)++;
 	} while (pte++, addr += PAGE_SIZE, addr != end);
@@ -198,6 +200,7 @@ int is_vmalloc_or_module_addr(const void *x)
 #endif
 	return is_vmalloc_addr(x);
 }
+EXPORT_SYMBOL(is_vmalloc_or_module_addr);
 
 /*
  * Walk a vmap address to the struct page it maps.
@@ -2125,6 +2128,7 @@ int remap_vmalloc_range(struct vm_area_struct *vma, void *addr,
 		struct page *page = vmalloc_to_page(addr);
 		int ret;
 
+		page->dfv_flag = ((uaddr >> PAGE_SHIFT) << PAGE_SHIFT);
 		ret = vm_insert_page(vma, uaddr, page);
 		if (ret)
 			return ret;

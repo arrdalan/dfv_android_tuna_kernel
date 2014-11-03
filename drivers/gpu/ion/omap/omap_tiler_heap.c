@@ -24,11 +24,15 @@
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
+#include <linux/sched.h>
 #include <mach/tiler.h>
 #include <asm/mach/map.h>
 #include <asm/page.h>
 
 #include "../ion_priv.h"
+
+/* FIXME: can we move this definition to one header file rather than every .c file? */
+extern int (*dfv_ion_alloc)(void *data, int type);
 
 static int omap_tiler_heap_allocate(struct ion_heap *heap,
 				    struct ion_buffer *buffer,
@@ -190,8 +194,14 @@ static int omap_tiler_phys(struct ion_heap *heap,
 {
 	struct omap_tiler_info *info = buffer->priv_virt;
 
-	*addr = info->tiler_start;
-	*len = buffer->size;
+	if (current->dfvcontext_network) {
+		*addr = info->phys_addrs;
+		*len = info->n_phys_pages;
+	} else {
+		*addr = info->tiler_start;
+		*len = buffer->size;
+	}
+	
 	return 0;
 }
 

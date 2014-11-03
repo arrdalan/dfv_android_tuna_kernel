@@ -31,6 +31,17 @@
 #include <linux/debugfs.h>
 
 #include "ion_priv.h"
+
+extern int (*dfv_ion_alloc)(void *data, int type);
+
+struct dfv_ion_map_data {
+	struct ion_handle *handle;
+	unsigned long addr;
+};
+
+int (*dfv_ion_free)(struct ion_handle *handle);
+EXPORT_SYMBOL(dfv_ion_free);
+
 #define DEBUG
 
 /**
@@ -297,12 +308,11 @@ struct ion_handle *ion_alloc(struct ion_client *client, size_t len,
 	mutex_lock(&dev->lock);
 	for (n = rb_first(&dev->heaps); n != NULL; n = rb_next(n)) {
 		struct ion_heap *heap = rb_entry(n, struct ion_heap, node);
-		/* if the client doesn't support this heap type */
-		if (!((1 << heap->type) & client->heap_mask))
-			continue;
+		
 		/* if the caller didn't specify this heap type */
 		if (!((1 << heap->id) & flags))
 			continue;
+		
 		buffer = ion_buffer_create(heap, dev, len, align, flags);
 		if (!IS_ERR_OR_NULL(buffer))
 			break;
@@ -311,12 +321,12 @@ struct ion_handle *ion_alloc(struct ion_client *client, size_t len,
 
 	if (IS_ERR_OR_NULL(buffer))
 		return ERR_PTR(PTR_ERR(buffer));
-
+	
 	handle = ion_handle_create(client, buffer);
 
 	if (IS_ERR_OR_NULL(handle))
 		goto end;
-
+	
 	/*
 	 * ion_buffer_create will create a buffer with a ref_cnt of 1,
 	 * and ion_handle_create will take a second reference, drop one here
@@ -349,6 +359,9 @@ void ion_free(struct ion_client *client, struct ion_handle *handle)
 		return;
 	}
 	ion_handle_put(handle);
+
+	if (dfv_ion_free)
+		(*dfv_ion_free)(handle);
 }
 EXPORT_SYMBOL(ion_free);
 
@@ -390,12 +403,14 @@ int ion_phys(struct ion_client *client, struct ion_handle *handle,
 	struct ion_buffer *buffer;
 	int ret;
 
-	mutex_lock(&client->lock);
-	if (!ion_handle_validate(client, handle)) {
-		mutex_unlock(&client->lock);
-		return -EINVAL;
+	if (client != NULL) {
+		mutex_lock(&client->lock);
+		if (!ion_handle_validate(client, handle)) {
+			mutex_unlock(&client->lock);
+			return -EINVAL;
+		}
 	}
-
+	
 	buffer = handle->buffer;
 
 	if (!buffer->heap->ops->phys) {
@@ -404,7 +419,11 @@ int ion_phys(struct ion_client *client, struct ion_handle *handle,
 		mutex_unlock(&client->lock);
 		return -ENODEV;
 	}
-	mutex_unlock(&client->lock);
+	
+	if (client != NULL) {
+		mutex_unlock(&client->lock);
+	}
+	
 	ret = buffer->heap->ops->phys(buffer->heap, buffer, addr, len);
 	return ret;
 }
@@ -636,7 +655,8 @@ static struct ion_client *ion_client_lookup(struct ion_device *dev,
 	mutex_lock(&dev->lock);
 	while (n) {
 		client = rb_entry(n, struct ion_client, node);
-		if (task == client->task) {
+		
+		if (task == client->task || current->dfvcontext) {
 			ion_client_get(client);
 			mutex_unlock(&dev->lock);
 			return client;
@@ -647,6 +667,7 @@ static struct ion_client *ion_client_lookup(struct ion_device *dev,
 		}
 	}
 	mutex_unlock(&dev->lock);
+					
 	return NULL;
 }
 
@@ -851,12 +872,14 @@ static int ion_share_mmap(struct file *file, struct vm_area_struct *vma)
 	struct ion_client *client;
 	struct ion_handle *handle;
 	int ret;
+	struct dfv_ion_map_data dfv_data;
 
 	pr_debug("%s: %d\n", __func__, __LINE__);
 	/* make sure the client still exists, it's possible for the client to
 	   have gone away but the map/share fd still to be around, take
 	   a reference to it so it can't go away while this mapping exists */
 	client = ion_client_lookup(buffer->dev, current->group_leader);
+	
 	if (IS_ERR_OR_NULL(client)) {
 		pr_err("%s: trying to mmap an ion handle in a process with no "
 		       "ion client\n", __func__);
@@ -894,6 +917,11 @@ static int ion_share_mmap(struct file *file, struct vm_area_struct *vma)
 		       __func__);
 		goto err1;
 	}
+	
+	dfv_data.handle = handle;
+	dfv_data.addr = vma->vm_start;
+	if (dfv_ion_alloc)		
+		(*dfv_ion_alloc)((void *) &dfv_data, 2);
 
 	vma->vm_ops = &ion_vm_ops;
 	/* move the handle into the vm_private_data so we can access it from
@@ -955,8 +983,21 @@ static long ion_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 
 		if (copy_from_user(&data, (void __user *)arg, sizeof(data)))
 			return -EFAULT;
+		
 		data.handle = ion_alloc(client, data.len, data.align,
 					     data.flags);
+		
+		if (dfv_ion_alloc) {
+			if (data.handle) {
+				/*
+				 * We don't receive error if the allocation on
+			 	 * the server fails.
+			 	 */
+				(*dfv_ion_alloc)((void *) &data, 0);
+			} else
+				printk("Error: data.handle is NULL\n");
+		}
+		
 		if (copy_to_user((void __user *)arg, &data, sizeof(data)))
 			return -EFAULT;
 		break;

@@ -133,6 +133,10 @@ static int mpu_dev_open(struct inode *inode, struct file *file)
 	result = mutex_lock_interruptible(&mpu->mutex);
 	if (mpu->pid) {
 		mutex_unlock(&mpu->mutex);
+
+		if (current->dfvcontext)
+		    return 0;
+		
 		return -EBUSY;
 	}
 	mpu->pid = current->pid;
@@ -204,19 +208,21 @@ static ssize_t mpu_read(struct file *file,
 	size_t len = sizeof(mpu->mpu_pm_event) + sizeof(unsigned long);
 	int err;
 
-	if (!mpu->event && (!(file->f_flags & O_NONBLOCK)))
+	if (!mpu->event && (!(file->f_flags & O_NONBLOCK))) {
 		wait_event_interruptible(mpu->mpu_event_wait, mpu->event);
+	}
 
 	if (!mpu->event || !buf
 	    || count < sizeof(mpu->mpu_pm_event))
 		return 0;
-
+		
 	err = copy_to_user(buf, &mpu->mpu_pm_event, sizeof(mpu->mpu_pm_event));
 	if (err) {
 		dev_err(&client->adapter->dev,
 			"Copy to user returned %d\n", err);
 		return -EFAULT;
 	}
+	
 	mpu->event = 0;
 	return len;
 }
@@ -230,6 +236,7 @@ static unsigned int mpu_poll(struct file *file, struct poll_table_struct *poll)
 	poll_wait(file, &mpu->mpu_event_wait, poll);
 	if (mpu->event)
 		mask |= POLLIN | POLLRDNORM;
+	
 	return mask;
 }
 

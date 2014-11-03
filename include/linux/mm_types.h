@@ -114,6 +114,9 @@ struct page {
 	 */
 	void *shadow;
 #endif
+	bool is_dfv_page;
+	void *dfv_data;
+	unsigned long dfv_flag;
 };
 
 typedef unsigned long __nocast vm_flags_t;

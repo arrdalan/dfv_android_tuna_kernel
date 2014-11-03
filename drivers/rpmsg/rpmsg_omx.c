@@ -105,6 +105,35 @@ static LIST_HEAD(rpmsg_omx_services_list);
 #endif
 #endif
 
+struct ion_buf_handles {	
+	u32 remote_buffer;
+	u32 buffer[3];
+	struct ion_client *client;
+};
+
+int (*dfv_sync_ion_bufs)(struct ion_buf_handles *handles, int write);
+EXPORT_SYMBOL(dfv_sync_ion_bufs);
+
+unsigned long (*dfv_virt2phys)(long vaddr);
+EXPORT_SYMBOL(dfv_virt2phys);
+
+struct ion_handle *(*dfv_get_ion_handle)(struct ion_handle *client_handle,
+						struct ion_client **client);
+EXPORT_SYMBOL(dfv_get_ion_handle);
+
+#define MAX_NUM_BUFS	20
+static int current_buf = 0;
+
+static struct ion_buf_handles all_bufs[MAX_NUM_BUFS];
+static int bufs_bitmap[MAX_NUM_BUFS];
+
+enum buf_log_state {        
+	STATE_RMTBUF_LOGGED = 0,
+	STATE_BUF_LOGGED = 1
+};
+/* We will first encounter a buffer log */
+static int log_state = STATE_RMTBUF_LOGGED;
+
 /*
  * TODO: Need to do this using lookup with rproc, but rproc is not
  * visible to rpmsg_omx
@@ -124,7 +153,8 @@ static u32 _rpmsg_pa_to_da(u32 pa)
 		return 0;
 }
 
-static u32 _rpmsg_omx_buffer_lookup(struct rpmsg_omx_instance *omx, long buffer)
+static u32 _rpmsg_omx_buffer_lookup(struct rpmsg_omx_instance *omx, long buffer,
+	phys_addr_t *_pa, struct ion_handle **_handle, struct ion_client **_client)
 {
 	phys_addr_t pa;
 	u32 va;
@@ -133,10 +163,26 @@ static u32 _rpmsg_omx_buffer_lookup(struct rpmsg_omx_instance *omx, long buffer)
 	ion_phys_addr_t paddr;
 	size_t unused;
 	int fd;
+	
+	struct ion_client *dfv_ion_client;
+	
+	if (current->dfvcontext && dfv_get_ion_handle) {
+		handle = (*dfv_get_ion_handle)((struct ion_handle *) buffer,
+							&dfv_ion_client);
+		
+		if (handle &&
+			!ion_phys(dfv_ion_client, handle, &paddr, &unused)) {
+			pa = (phys_addr_t)paddr;
+			*_client = dfv_ion_client;
+			*_handle = handle;
+			goto to_va;
+		}
+	}
 
 	/* is it an ion handle? */
 	handle = (struct ion_handle *)buffer;
 	if (!ion_phys(omx->ion_client, handle, &paddr, &unused)) {
+		
 		pa = (phys_addr_t) paddr;
 		goto to_va;
 	}
@@ -147,21 +193,55 @@ static u32 _rpmsg_omx_buffer_lookup(struct rpmsg_omx_instance *omx, long buffer)
 		struct ion_client *pvr_ion_client;
 		fd = buffer;
 		handle = PVRSRVExportFDToIONHandle(fd, &pvr_ion_client);
+		
 		if (handle &&
 			!ion_phys(pvr_ion_client, handle, &paddr, &unused)) {
 			pa = (phys_addr_t)paddr;
+			*_client = pvr_ion_client;
+			*_handle = handle;
+			
 			goto to_va;
 		}
 	}
 #endif
 #endif
-	pa = (phys_addr_t) tiler_virt2phys(buffer);
+	
+	if (current->dfvcontext) {
+		if (dfv_virt2phys)
+			pa = (phys_addr_t) (*dfv_virt2phys)(buffer);
+		else {
+			printk("Error: in dfvcontext but dfv_virt2phys is not set\n");				
+			pa = 0x0;
+		}
+	} else
+		pa = (phys_addr_t) tiler_virt2phys(buffer);
 
 #ifdef CONFIG_ION_OMAP
 to_va:
 #endif
 	va = _rpmsg_pa_to_da(pa);
+	if (!va)
+		va = -1;
+		
 	return va;
+}
+
+void log_buf(u32 buffer, int buf_num, struct ion_client *client)
+{	
+	if (log_state != STATE_RMTBUF_LOGGED)
+		printk("Error: Unexpected log state\n");
+	else {
+		if (current_buf >= MAX_NUM_BUFS)
+			printk("Error: More buffers than expected.\n");
+		else {
+			all_bufs[current_buf].buffer[buf_num] = buffer;
+			if (buf_num == 2) {
+				log_state = STATE_BUF_LOGGED;
+			} else if (buf_num == 1)
+				all_bufs[current_buf].client = client;			
+			
+		}		
+	}
 }
 
 static int _rpmsg_omx_map_buf(struct rpmsg_omx_instance *omx, char *packet)
@@ -171,6 +251,10 @@ static int _rpmsg_omx_map_buf(struct rpmsg_omx_instance *omx, char *packet)
 	char *data;
 	enum rpc_omx_map_info_type maptype;
 	u32 da = 0;
+	phys_addr_t pa;
+	struct ion_handle *_handle = 0x0;
+	struct ion_client *_client = 0x0;
+	int logged = 0;
 
 	data = (char *)((struct omx_packet *)packet)->data;
 	maptype = *((enum rpc_omx_map_info_type *)data);
@@ -186,8 +270,11 @@ static int _rpmsg_omx_map_buf(struct rpmsg_omx_instance *omx, char *packet)
 	offset = *(int *)((int)data + sizeof(maptype));
 	buffer = (long *)((int)data + offset);
 
-	da = _rpmsg_omx_buffer_lookup(omx, *buffer);
-	if (da) {
+	da = _rpmsg_omx_buffer_lookup(omx, *buffer, &pa, &_handle, &_client);
+	
+	log_buf(_handle, 0, _client);
+		
+	if (da) {		
 		*buffer = da;
 		ret = 0;
 	}
@@ -196,7 +283,10 @@ static int _rpmsg_omx_map_buf(struct rpmsg_omx_instance *omx, char *packet)
 		buffer = (long *)((int)data + offset + sizeof(*buffer));
 		if (*buffer != 0) {
 			ret = -EIO;
-			da = _rpmsg_omx_buffer_lookup(omx, *buffer);
+			da = _rpmsg_omx_buffer_lookup(omx, *buffer, &pa, &_handle, &_client);
+			
+			log_buf(_handle, 1, _client);
+		
 			if (da) {
 				*buffer = da;
 				ret = 0;
@@ -208,7 +298,10 @@ static int _rpmsg_omx_map_buf(struct rpmsg_omx_instance *omx, char *packet)
 		buffer = (long *)((int)data + offset + 2*sizeof(*buffer));
 		if (*buffer != 0) {
 			ret = -EIO;
-			da = _rpmsg_omx_buffer_lookup(omx, *buffer);
+			log_buf(*buffer, 2, _client);			
+			
+			da = _rpmsg_omx_buffer_lookup(omx, *buffer, &pa, &_handle, &_client);
+			
 			if (da) {
 				*buffer = da;
 				ret = 0;
@@ -216,6 +309,125 @@ static int _rpmsg_omx_map_buf(struct rpmsg_omx_instance *omx, char *packet)
 		}
 	}
 	return ret;
+}
+
+
+void update_current_buf(void)
+{
+	int i;
+	
+	bufs_bitmap[current_buf] = 1;
+
+	for (i = 0; i < MAX_NUM_BUFS; i++) {
+		if (bufs_bitmap[i] == 0) {			
+			current_buf = i;
+			return;
+		}
+	}
+	
+	printk("Error: We ran out of bufs. This should not have happenend.\n");
+	BUG();	
+}
+
+/*
+ * Developed with help from RPC_CallbackThread() in
+ * omap4xxx/domx/domx/omx_rpc/src/omx_rpc.c and from
+ * RPC_SKEL_FillBufferDone() in
+ * omap4xxx/domx/domx/omx_rpc/src/omx_rpc_skel.c and from
+ * _rpmsg_omx_buffer_lookup() in this file.
+ */
+static bool inspect_packet(struct rpmsg_omx_instance *omx, char *packet)
+{
+	uint32_t fxn_idx = 0;
+	char *data;
+	u32 buffer_hdr, filled_len, offset;
+	u32 buffer, remote_buffer;
+	int num_bufs, i;
+	phys_addr_t pa;
+	bool wakeup = true;
+	
+	fxn_idx = ((struct omx_packet *) packet)->fxn_idx;
+	
+	/* Indices from static table will have bit 31 set */
+	if (fxn_idx & 0x80000000)
+		fxn_idx &= 0x0FFFFFFF;
+	
+	data = ((struct omx_packet *) packet)->data;
+	
+	switch(fxn_idx) {
+		
+	case 3: /* RPC_OMX_FXN_IDX_USE_BUFFER */
+		
+		buffer = *((u32 *)((u32)data + 24)); /* Not valid. */
+		remote_buffer = *((u32 *)((u32)data + 36));
+		
+		if (log_state != STATE_BUF_LOGGED)
+			printk("Error: Unexpected log state\n");
+		else {
+			/* This should not happen, but we check anyway for safety. */
+			if (current_buf >= MAX_NUM_BUFS)
+				printk("Error: More buffers than expected.\n");
+			else {
+				all_bufs[current_buf].remote_buffer = remote_buffer;
+				update_current_buf();
+				log_state = STATE_RMTBUF_LOGGED;	
+			}
+		}	
+
+		break;
+		
+	case 11: /* RPC_OMX_FXN_IDX_FILLTHISBUFFER */
+		wakeup = false;
+		break;
+		
+	case 12: /* RPC_OMX_FXN_IDX_FILLBUFFERDONE */
+		
+		buffer_hdr = *((u32 *)((u32)data + sizeof(u32)));
+		filled_len = *((u32 *)((u32)data + (2 * sizeof(u32))));
+		offset = *((u32 *)((u32)data + (3 * sizeof(u32))));
+		
+		num_bufs = MAX_NUM_BUFS;
+							
+		for (i = 0; i < num_bufs; i++) {
+			if (all_bufs[i].remote_buffer != buffer_hdr)
+				continue;
+		
+			
+			if (dfv_sync_ion_bufs)
+				(*dfv_sync_ion_bufs)(&all_bufs[i], 1);			
+
+			break;
+		}
+		
+		break;
+	
+	case 13: /* RPC_OMX_FXN_IDX_FREE_BUFFER */
+		
+		buffer_hdr = *((u32 *)((u32)data + 16));
+		
+		num_bufs = MAX_NUM_BUFS;
+							
+		for (i = 0; i < num_bufs; i++) {
+			if (all_bufs[i].remote_buffer != buffer_hdr)
+				continue;
+		
+			all_bufs[i].remote_buffer = 0x0;
+			all_bufs[i].buffer[0] = 0x0;
+			all_bufs[i].buffer[1] = 0x0;
+			all_bufs[i].buffer[2] = 0x0;
+			all_bufs[i].client = 0x0;
+			bufs_bitmap[i] = 0;
+
+			break;
+		}
+		
+		break;	
+		
+	default:
+		break;
+	}
+	
+	return wakeup;		
 }
 
 static void rpmsg_omx_cb(struct rpmsg_channel *rpdev, void *data, int len,
@@ -226,6 +438,7 @@ static void rpmsg_omx_cb(struct rpmsg_channel *rpdev, void *data, int len,
 	struct omx_conn_rsp *rsp;
 	struct sk_buff *skb;
 	char *skbdata;
+	bool wakeup;
 
 	if (len < sizeof(*hdr) || hdr->len < len - sizeof(*hdr)) {
 		dev_warn(&rpdev->dev, "%s: truncated message\n", __func__);
@@ -267,8 +480,12 @@ static void rpmsg_omx_cb(struct rpmsg_channel *rpdev, void *data, int len,
 		mutex_lock(&omx->lock);
 		skb_queue_tail(&omx->queue, skb);
 		mutex_unlock(&omx->lock);
-		/* wake up any blocking processes, waiting for new data */
-		wake_up_interruptible(&omx->readq);
+		wakeup = inspect_packet(omx, hdr->data);
+		
+		if (wakeup)
+			/* wake up any blocking processes, waiting for new data */
+			wake_up_interruptible(&omx->readq);
+		
 		break;
 	default:
 		dev_warn(&rpdev->dev, "unexpected msg type: %d\n", hdr->type);
@@ -581,6 +798,7 @@ static ssize_t rpmsg_omx_write(struct file *filp, const char __user *ubuf,
 	if (copy_from_user(hdr->data, ubuf, use))
 		return -EMSGSIZE;
 
+	
 	ret = _rpmsg_omx_map_buf(omx, hdr->data);
 	if (ret < 0)
 		return ret;
@@ -790,6 +1008,7 @@ static struct rpmsg_driver rpmsg_omx_driver = {
 static int __init init(void)
 {
 	int ret;
+	int i;
 
 	ret = alloc_chrdev_region(&rpmsg_omx_dev, 0, MAX_OMX_DEVICES,
 							KBUILD_MODNAME);
@@ -804,6 +1023,8 @@ static int __init init(void)
 		pr_err("class_create failed: %d\n", ret);
 		goto unreg_region;
 	}
+	for (i = 0; i < MAX_NUM_BUFS; i++)
+		bufs_bitmap[i] = 0;
 
 	return register_rpmsg_driver(&rpmsg_omx_driver);
 
